@@ -12,15 +12,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 mod config;
+mod kubectl;
+mod terraform;
 
 use config::Config;
 
 fn main() -> Result<(), Error> {
-    let default_dir = home_with(".config/cluster-launcher");
-    let default_config = home_with(".config/cluster-launcher/config.toml");
+    let default_dir = home_with(".config/clusterctl");
+    let default_config = home_with(".config/clusterctl/config.toml");
     create_dir(&default_dir.clone()).expect("could not create default config dir");
 
-    let app = App::new("cluster-launcher")
+    let app = App::new("clusterctl")
+        .about("Interactive wrapper that stands up and tears down Kubernetes")
         .version("0.1.0")
         .arg(
             Arg::with_name("config")
@@ -30,15 +33,18 @@ fn main() -> Result<(), Error> {
                 .takes_value(true)
                 .default_value(&default_config),
         )
-        .subcommand(SubCommand::with_name("destroy-cluster").about("destroy a k8s cluster"))
-        .subcommand(
+        .subcommands(vec![
+            SubCommand::with_name("cache-assets").about("cache generated kube configs locally"),
+            SubCommand::with_name("destroy-cluster").about("destroy a k8s cluster"),
             SubCommand::with_name("destroy-kubernetes-ingress")
                 .about("destroy the ingress DNS records"),
-        )
-        .subcommand(
             SubCommand::with_name("launch-cluster")
                 .about("launch a new k8s cluster with the terraform tectonic installer"),
-        );
+            SubCommand::with_name("namespace-init")
+                .about("create namespaces with secrets and config maps"),
+            SubCommand::with_name("argo-init").about("install and configure argo on a cluster"),
+            SubCommand::with_name("tool-check").about("check for required tools on PATH"),
+        ]);
 
     // Load config
     let matches = app.get_matches();
@@ -49,16 +55,70 @@ fn main() -> Result<(), Error> {
 
     // Subcommands
     match matches.subcommand() {
-        ("destroy-cluster", _) => {
-            destroy_cluster(&config)?;
-        }
-        ("destroy-kubernetes-ingress", _) => {
-            destroy_kubernetes_ingress(&config, None)?;
-        }
-        ("launch-cluster", _) => {
-            launch_cluster(&config)?;
-        }
+        ("destroy-cluster", _) => destroy_cluster(&config)?,
+        ("destroy-kubernetes-ingress", _) => destroy_kubernetes_ingress(&config, None)?,
+        ("launch-cluster", _) => launch_cluster(&config)?,
+        ("namespace-init", _) => namespace_init(&config, None)?,
         _ => return Err(anyhow!("you must provide a subcommand")),
+    }
+
+    Ok(())
+}
+
+fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
+    let cluster_id = cluster_id.unwrap_or(pick_cluster_id_prompt()?);
+    let infra_profile = &conf.infra_profile;
+
+    // fetch kubeconfig
+    let bucket = assets_bucket_name(&cluster_id, infra_profile)?;
+    let cache_dir = Path::new(&conf.assets_cache_path).join(&cluster_id);
+    create_dir(&cache_dir)?;
+    let kubeconfig_path = cache_dir.join("kubeconfig");
+    let path = kubeconfig_path
+        .to_str()
+        .ok_or(anyhow!("malformed assets path"))?;
+    download_kubeconfig(&bucket, infra_profile, path)?;
+
+    // create namespace
+    let k = kubectl::Kubectl::new(&path);
+    let d_ns = default_namespace(&cluster_id);
+
+    if continue_prompt("Create default namespace?") {
+        let status = k.create_namespace(d_ns)?;
+        if !status.success() {
+            return Err(anyhow!("could not create namespace"));
+        }
+    } else {
+        return Ok(());
+    }
+
+    let secure_manifests = &conf.keybase_secure_manifests_path;
+    let shared_secrets = Path::new(secure_manifests).join("secrets/shared");
+    let default_ns_secrets = Path::new(secure_manifests).join(format!("secrets/{}", d_ns));
+    let default_ns_configmaps = Path::new(secure_manifests).join(format!("configMaps/{}", d_ns));
+    if continue_prompt("Deploy secrets and config maps?") {
+        let status = k.create_with_manifest_recursive("kube-system", shared_secrets.to_str().unwrap())?;
+        if !status.success() {
+            println!("got an error creating kube-system secrets");
+        }
+        let status = k.create_with_manifest_recursive(d_ns, default_ns_secrets.to_str().unwrap())?;
+        if !status.success() {
+            println!("got an error creating {} namespace secrets", d_ns);
+        }
+        let status = k.create_with_manifest_recursive(d_ns, default_ns_configmaps.to_str().unwrap())?;
+        if !status.success() {
+            println!("got an error creating {} namespace configmaps", d_ns);
+        }
+        let status = k.create_config_map_literal("kube-system", "cluster-info", "cluster-name", &cluster_id)?;
+        if !status.success() {
+            println!("got an error creating cluster-info configmap in kube-system");
+        }
+        let status = k.create_config_map_literal(d_ns, "cluster-info", "cluster-name", &cluster_id)?;
+        if !status.success() {
+            println!("got an error creating cluster-info configmap in {}", d_ns);
+        }
+    } else {
+        return Ok(());
     }
 
     Ok(())
@@ -79,7 +139,7 @@ This will step you through launching a cluster.
     println!("Path: {:?}", path);
     println!("Command: terraform get -update");
     if continue_prompt("Execute command?") {
-        let status = terraform_get_update(&path)?;
+        let status = terraform::get_update(&path)?;
         if !status.success() {
             return Err(anyhow!("could not update modules"));
         }
@@ -91,7 +151,7 @@ This will step you through launching a cluster.
     println!("Path: {:?}", path);
     println!("Command: terraform workspace select {}", cluster_id);
     if continue_prompt("Execute command?") {
-        let status = terraform_workspace_select(&path, &cluster_id, &infra_profile)?;
+        let status = terraform::workspace_select(&path, &cluster_id, &infra_profile)?;
         if !status.success() {
             return Err(anyhow!("select workspace {}", cluster_id));
         }
@@ -106,7 +166,7 @@ This will step you through launching a cluster.
         cluster_id
     );
     if continue_prompt("Execute command?") {
-        let status = terraform_plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
+        let status = terraform::plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
         match status.code() {
             Some(1) => {
                 return Err(anyhow!("could not plan kubernetes-tectonic"));
@@ -121,7 +181,7 @@ This will step you through launching a cluster.
     println!("Path: {:?}", path);
     println!("Command: terraform apply tfplan.out");
     if continue_prompt("Execute command?") {
-        let status = terraform_apply(&path, &infra_profile)?;
+        let status = terraform::apply(&path, &infra_profile)?;
         if !status.success() {
             println!("\nAn error occurred, but this is expected");
         }
@@ -136,7 +196,7 @@ This will step you through launching a cluster.
         cluster_id
     );
     if continue_prompt("Execute command?") {
-        let status = terraform_plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
+        let status = terraform::plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
         match status.code() {
             Some(1) => {
                 return Err(anyhow!("could not re-plan kubernetes-tectonic"));
@@ -150,7 +210,7 @@ This will step you through launching a cluster.
     println!("Path: {:?}", path);
     println!("Command: terraform apply tfplan.out");
     if continue_prompt("Execute command?") {
-        let status = terraform_apply(&path, &infra_profile)?;
+        let status = terraform::apply(&path, &infra_profile)?;
         if !status.success() {
             return Err(anyhow!("unexpected error on second apply"));
         }
@@ -173,7 +233,7 @@ fn destroy_kubernetes_ingress(conf: &Config, cluster_id: Option<String>) -> Resu
     println!("Path: {:?}", path);
     println!("Command: terraform workspace select {}", cluster_id);
     if continue_prompt("Execute command?") {
-        let status = terraform_workspace_select(&path, &cluster_id, &v1_profile)?;
+        let status = terraform::workspace_select(&path, &cluster_id, &v1_profile)?;
         if !status.success() {
             return Err(anyhow!("could not select workspace"));
         }
@@ -190,7 +250,7 @@ fn destroy_kubernetes_ingress(conf: &Config, cluster_id: Option<String>) -> Resu
         cluster_id
     );
     if continue_prompt("Execute command?") {
-        let status = terraform_plan_destroy_with_tfvars_file(&path, &cluster_id, v1_profile)?;
+        let status = terraform::plan_destroy_with_tfvars_file(&path, &cluster_id, v1_profile)?;
         match status.code() {
             Some(1) => return Err(anyhow!("unexpected error in -destroy plan")),
             _ => { /* no op - continue */ }
@@ -206,7 +266,7 @@ fn destroy_kubernetes_ingress(conf: &Config, cluster_id: Option<String>) -> Resu
     println!("Path: {:?}", path);
     println!("Command: terraform apply tfplan.out");
     if continue_prompt("Execute command?") {
-        let status = terraform_apply(&path, v1_profile)?;
+        let status = terraform::apply(&path, v1_profile)?;
         if !status.success() {
             return Err(anyhow!("unexpected error"));
         }
@@ -273,7 +333,7 @@ This will step you through destroying a cluster.
         return Ok(());
     }
 
-    let status = terraform_workspace_select(&path, &cluster_id, infra_profile)?;
+    let status = terraform::workspace_select(&path, &cluster_id, infra_profile)?;
     if !status.success() {
         return Err(anyhow!("terraform workspace select"));
     }
@@ -293,7 +353,7 @@ This will step you through destroying a cluster.
         .interact()?;
 
     if idx == 0 {
-        let status = terraform_state_rm(
+        let status = terraform::state_rm(
             &path,
             &[
                 "module.tectonic-aws.module.bootkube.template_dir.bootkube",
@@ -314,7 +374,7 @@ This will step you through destroying a cluster.
         cluster_id
     );
     if continue_prompt("Execute command?") {
-        let status = terraform_plan_destroy_with_tfvars_file(&path, &cluster_id, infra_profile)?;
+        let status = terraform::plan_destroy_with_tfvars_file(&path, &cluster_id, infra_profile)?;
         // NOTE: we should be able to match on exit code 0 here to indicate no
         // diff was found, but it does not seem to work. We get exit code 2,
         // even when the plan shows no diff (e.g. -destroy against a cluster
@@ -342,7 +402,7 @@ so we must double check the workspace we are on!
     println!("Command: terraform workspace show");
     if continue_prompt("Execute_command?") {
         println!("");
-        let status = terraform_workspace_show(&path, infra_profile)?;
+        let status = terraform::workspace_show(&path, infra_profile)?;
         if !status.success() {
             return Err(anyhow!("terraform workspace show"));
         }
@@ -359,7 +419,7 @@ so we must double check the workspace we are on!
     println!("Path: {:?}", path);
     println!("Command: terraform apply tfplan.out");
     if continue_prompt("Execute command?") {
-        let status = terraform_apply(&path, infra_profile)?;
+        let status = terraform::apply(&path, infra_profile)?;
         if !status.success() {
             println!("\nterraform apply encountered an error, but this is expected.");
         }
@@ -377,7 +437,7 @@ so we must double check the workspace we are on!
         cluster_id
     );
     if continue_prompt("Execute command?") {
-        let status = terraform_plan_destroy_with_tfvars_file(&path, &cluster_id, infra_profile)?;
+        let status = terraform::plan_destroy_with_tfvars_file(&path, &cluster_id, infra_profile)?;
         match status.code() {
             Some(1) => return Err(anyhow!("unexpected error")),
             _ => { /* no op - continue */ }
@@ -414,105 +474,6 @@ fn create_dir<P: AsRef<Path>>(p: P) -> Result<(), Error> {
     Ok(())
 }
 
-fn terraform_plan_destroy_with_tfvars_file<P: AsRef<Path>>(
-    dir: P,
-    tfvars: &str,
-    profile: &str,
-) -> Result<ExitStatus, Error> {
-    let tfvars = format!("{}.tfvars", tfvars);
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec![
-        "plan",
-        "-out",
-        "tfplan.out",
-        "-var-file",
-        &tfvars,
-        "-destroy",
-        "-detailed-exitcode",
-    ]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_plan_with_tfvars_file<P: AsRef<Path>>(
-    dir: P,
-    tfvars: &str,
-    profile: &str,
-) -> Result<ExitStatus, Error> {
-    let tfvars = format!("{}.tfvars", tfvars);
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec![
-        "plan",
-        "-out",
-        "tfplan.out",
-        "-var-file",
-        &tfvars,
-        "-detailed-exitcode",
-    ]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_apply<P: AsRef<Path>>(dir: P, profile: &str) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec!["apply", "tfplan.out"]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_workspace_select<P: AsRef<Path>>(
-    dir: P,
-    workspace: &str,
-    profile: &str,
-) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec!["workspace", "select", workspace]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_workspace_show<P: AsRef<Path>>(dir: P, profile: &str) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec!["workspace", "show"]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_version<P: AsRef<Path>>(dir: P, profile: &str) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec!["version"]);
-    Ok(cmd.status()?)
-}
-
-fn terraform_state_rm<P: AsRef<Path>>(
-    dir: P,
-    states: &[&str],
-    profile: &str,
-) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.env("AWS_PROFILE", profile);
-    cmd.current_dir(&dir);
-    cmd.args(vec!["state", "rm"]);
-    for state in states {
-        cmd.arg(state);
-    }
-    Ok(cmd.status()?)
-}
-
-fn terraform_get_update<P: AsRef<Path>>(dir: P) -> Result<ExitStatus, Error> {
-    let mut cmd = Command::new("terraform");
-    cmd.current_dir(&dir);
-    cmd.args(vec!["get", "-update"]);
-    Ok(cmd.status()?)
-}
-
 fn valid_clusters() -> Vec<&'static str> {
     vec![
         "development0",
@@ -522,6 +483,49 @@ fn valid_clusters() -> Vec<&'static str> {
         "production1",
         "production2",
     ]
+}
+
+fn assets_bucket_name(cluster_id: &str, profile: &str) -> Result<String, Error> {
+    let matcher = format!("a{}", cluster_id);
+    use std::str::FromStr;
+    let mut cmd = Command::new("aws");
+    cmd.env("AWS_PROFILE", profile);
+    cmd.args(vec![
+        "s3api",
+        "list-buckets",
+        "--query",
+        "Buckets[].Name",
+        "--output",
+        "text",
+    ]);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        // println!("STDOUT {:?}", std::str::from_utf8(&output.stderr)?);
+        // println!("STDERR {:?}", std::str::from_utf8(&output.stdout)?);
+        return Err(anyhow!("listing buckets with aws cli failed"));
+    }
+    let s = std::str::from_utf8(&output.stdout)?;
+    for item in s.split_whitespace() {
+        if item.starts_with(&matcher) {
+            return Ok(String::from_str(item)?);
+        }
+    }
+    Err(anyhow!("could not locate assets bucket for {}", cluster_id))
+}
+
+fn download_kubeconfig(bucket: &str, profile: &str, output: &str) -> Result<ExitStatus, Error> {
+    let mut cmd = Command::new("aws");
+    cmd.env("AWS_PROFILE", profile);
+    cmd.args(vec![
+        "s3api",
+        "get-object",
+        "--bucket",
+        bucket,
+        "--key",
+        "kubeconfig",
+        output,
+    ]);
+    Ok(cmd.status()?)
 }
 
 fn continue_prompt(msg: &'static str) -> bool {
@@ -569,4 +573,14 @@ fn pick_cluster_id_prompt() -> Result<String, Error> {
         .items(&ids)
         .interact()?;
     Ok(ids[idx].to_owned())
+}
+
+fn default_namespace(cluster_id: &str) -> &'static str {
+    if cluster_id.starts_with("development") {
+        return "development";
+    }
+    if cluster_id.starts_with("production") {
+        return "production";
+    }
+    unreachable!("unknown cluster id {}", cluster_id)
 }
