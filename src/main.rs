@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
+#![allow(unused_variables)]
 use anyhow::{anyhow, Error};
 use clap::{App, Arg, SubCommand};
 use console::Style;
@@ -12,9 +13,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 mod config;
+mod helm;
 mod kubectl;
+mod runner;
 mod terraform;
 
+use runner::Expect;
 use config::Config;
 
 fn main() -> Result<(), Error> {
@@ -59,7 +63,39 @@ fn main() -> Result<(), Error> {
         ("destroy-kubernetes-ingress", _) => destroy_kubernetes_ingress(&config, None)?,
         ("launch-cluster", _) => launch_cluster(&config)?,
         ("namespace-init", _) => namespace_init(&config, None)?,
+        ("argo-init", _) => argo_init(&config, None)?,
         _ => return Err(anyhow!("you must provide a subcommand")),
+    }
+
+    Ok(())
+}
+fn argo_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
+    let cluster_id = cluster_id.unwrap_or(pick_cluster_id_prompt()?);
+    let infra_profile = &conf.infra_profile;
+
+    // fetch kubeconfig
+    let bucket = assets_bucket_name(&cluster_id, infra_profile)?;
+    let cache_dir = Path::new(&conf.assets_cache_path).join(&cluster_id);
+    create_dir(&cache_dir)?;
+    let kubeconfig_path = cache_dir.join("kubeconfig");
+    let path = kubeconfig_path
+        .to_str()
+        .ok_or(anyhow!("malformed assets path"))?;
+    download_kubeconfig(&bucket, infra_profile, path)?;
+
+    // create namespace
+    let k = kubectl::Kubectl::new(&path);
+    let d_ns = default_namespace(&cluster_id);
+
+    let deployments = &conf.kubernetes_deployments_path;
+    if continue_prompt("Create argocd namespace?") {
+        let status = k.create_namespace("argocd")?;
+        //        let status = run!(k.create_namespace("argocd"));
+        if !status.success() {
+            return Err(anyhow!("could not create namespace"));
+        }
+    } else {
+        return Ok(());
     }
 
     Ok(())
@@ -97,23 +133,32 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
     let default_ns_secrets = Path::new(secure_manifests).join(format!("secrets/{}", d_ns));
     let default_ns_configmaps = Path::new(secure_manifests).join(format!("configMaps/{}", d_ns));
     if continue_prompt("Deploy secrets and config maps?") {
-        let status = k.create_with_manifest_recursive("kube-system", shared_secrets.to_str().unwrap())?;
+        let status =
+            k.create_with_manifest_recursive("kube-system", shared_secrets.to_str().unwrap())?;
         if !status.success() {
             println!("got an error creating kube-system secrets");
         }
-        let status = k.create_with_manifest_recursive(d_ns, default_ns_secrets.to_str().unwrap())?;
+        let status =
+            k.create_with_manifest_recursive(d_ns, default_ns_secrets.to_str().unwrap())?;
         if !status.success() {
             println!("got an error creating {} namespace secrets", d_ns);
         }
-        let status = k.create_with_manifest_recursive(d_ns, default_ns_configmaps.to_str().unwrap())?;
+        let status =
+            k.create_with_manifest_recursive(d_ns, default_ns_configmaps.to_str().unwrap())?;
         if !status.success() {
             println!("got an error creating {} namespace configmaps", d_ns);
         }
-        let status = k.create_config_map_literal("kube-system", "cluster-info", "cluster-name", &cluster_id)?;
+        let status = k.create_config_map_literal(
+            "kube-system",
+            "cluster-info",
+            "cluster-name",
+            &cluster_id,
+        )?;
         if !status.success() {
             println!("got an error creating cluster-info configmap in kube-system");
         }
-        let status = k.create_config_map_literal(d_ns, "cluster-info", "cluster-name", &cluster_id)?;
+        let status =
+            k.create_config_map_literal(d_ns, "cluster-info", "cluster-name", &cluster_id)?;
         if !status.success() {
             println!("got an error creating cluster-info configmap in {}", d_ns);
         }
