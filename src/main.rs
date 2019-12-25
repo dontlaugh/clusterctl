@@ -18,8 +18,8 @@ mod kubectl;
 mod runner;
 mod terraform;
 
-use runner::Expect;
 use config::Config;
+use runner::{Cmd, Expect};
 
 fn main() -> Result<(), Error> {
     let default_dir = home_with(".config/clusterctl");
@@ -181,16 +181,15 @@ This will step you through launching a cluster.
     let infra_profile = &conf.infra_profile;
     let cluster_id = pick_cluster_id_prompt()?;
     let path = Path::new(&conf.terraforming_path.clone()).join("projects/kubernetes-tectonic");
-    println!("Path: {:?}", path);
-    println!("Command: terraform get -update");
-    if continue_prompt("Execute command?") {
-        let status = terraform::get_update(&path)?;
-        if !status.success() {
-            return Err(anyhow!("could not update modules"));
-        }
-    } else {
-        return Ok(());
-    }
+
+    let mut c = Cmd::new(vec!["terraform", "get", "-update"]);
+    let c = c.dir(path.clone());
+
+    prompt_run! {
+        "Execute command?",
+        c,
+        Expect::Success
+    };
 
     println!("\nSelect the correct workspace");
     println!("Path: {:?}", path);

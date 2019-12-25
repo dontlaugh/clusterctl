@@ -1,3 +1,4 @@
+use crate::runner::Proc;
 use anyhow::{anyhow, Error};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -94,9 +95,9 @@ pub fn state_rm<P: AsRef<Path>>(
     Ok(cmd.status()?)
 }
 
-pub fn get_update<P: AsRef<Path>>(dir: P) -> Result<ExitStatus, Error> {
+pub fn get_update<P: AsRef<Path>>(dir: P) -> Result<Proc, Error> {
     let mut cmd = Command::new("terraform");
     cmd.current_dir(&dir);
     cmd.args(vec!["get", "-update"]);
-    Ok(cmd.status()?)
+    Ok(Proc::Status(cmd.status()?))
 }
