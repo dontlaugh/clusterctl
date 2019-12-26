@@ -3,8 +3,9 @@ use console::Style;
 use dialoguer::{theme::ColorfulTheme, Confirmation, Input, Select};
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -72,6 +73,11 @@ impl<'a> Cmd<'a> {
             c.current_dir(&cwd);
         }
 
+        if let Some(_) = &self.working_dir {
+            // we only handle stdout redirection right now
+            c.stdout(Stdio::piped());
+        }
+
         Ok(c.spawn()?)
     }
 }
@@ -98,6 +104,7 @@ macro_rules! prompt_run {
     ($prompt:literal, $cmd:expr, $expect:expr) => {{
         use crate::runner::{Expect, Proc};
         use std::env::current_dir;
+        use std::io::Write;
         use std::process::Child;
 
         // print message
@@ -121,8 +128,27 @@ macro_rules! prompt_run {
             1 => std::process::exit(1),
             0 => {
                 // spawn - get child
-                let mut child = $cmd.spawn()?;
-                let status = child.wait()?;
+                let mut writes_file = false;
+                if let Some(_) = $cmd.writes_file {
+                    writes_file = true;
+                }
+
+                let status = {
+                    match writes_file {
+                        false => {
+                            let mut child = $cmd.spawn()?;
+                            child.wait()?
+                        }
+                        true => {
+                            let path = $cmd.writes_file.as_ref().unwrap();
+                            let child = $cmd.spawn()?;
+                            let output = child.wait_with_output()?;
+                            let mut f = File::create(&path)?;
+                            f.write_all(&output.stdout)?;
+                            output.status
+                        }
+                    }
+                };
                 // Assign a bool based on the result we expect
                 let ok = {
                     match $expect {
