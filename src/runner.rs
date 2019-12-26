@@ -107,13 +107,8 @@ macro_rules! prompt_run {
             $cmd.working_dir.as_ref().unwrap_or(&current_dir()?)
         );
         // print command
-        println!(
-            "COMMAND: {:?}",
-            $cmd.command
-
-        );
+        println!("COMMAND: {:?}", $cmd.command);
         // print choice prompt
-
         let theme = prompt_theme();
         let idx = Select::with_theme(&theme)
             .with_prompt($prompt)
@@ -128,12 +123,15 @@ macro_rules! prompt_run {
                 // spawn - get child
                 let mut child = $cmd.spawn()?;
                 let status = child.wait()?;
+                // Assign a bool based on the result we expect
                 let ok = {
                     match $expect {
                         Expect::Success => status.success(),
                         Expect::Failure => !status.success(),
                         Expect::Code(code) => status.code().unwrap() == code,
                         Expect::Any => true,
+                        // Expect variants that say we should scan the command
+                        // output are unimplemented
                         _ => unimplemented!(),
                     }
                 };

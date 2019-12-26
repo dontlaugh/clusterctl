@@ -184,83 +184,51 @@ This will step you through launching a cluster.
 
     let mut c = Cmd::new(vec!["terraform", "get", "-update"]);
     let c = c.dir(path.clone());
-
-    prompt_run! {
-        "Execute command?",
-        c,
-        Expect::Success
-    };
+    prompt_run! {"Execute command?", c, Expect::Success};
 
     println!("\nSelect the correct workspace");
-    println!("Path: {:?}", path);
-    println!("Command: terraform workspace select {}", cluster_id);
-    if continue_prompt("Execute command?") {
-        let status = terraform::workspace_select(&path, &cluster_id, &infra_profile)?;
-        if !status.success() {
-            return Err(anyhow!("select workspace {}", cluster_id));
-        }
-    } else {
-        return Ok(());
-    }
+    let mut c = Cmd::new(vec!["terraform", "workspace", "select", &cluster_id]);
+    let c = c.dir(path.clone());
+    prompt_run! {"Execute command?", c, Expect::Success};
 
     println!("\nPlan changes to kubernetes-tectonic");
-    println!("Path: {:?}", path);
-    println!(
-        "Command: terraform plan -out tfplan.out -var-file {}.tfvars",
-        cluster_id
-    );
-    if continue_prompt("Execute command?") {
-        let status = terraform::plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
-        match status.code() {
-            Some(1) => {
-                return Err(anyhow!("could not plan kubernetes-tectonic"));
-            }
-            _ => { /* no op - continue */ }
-        }
-    } else {
-        return Ok(());
-    }
+    let tfvars = format!("{}.tfvars", &cluster_id);
+    let mut c = Cmd::new(vec![
+        "terraform",
+        "plan",
+        "-out",
+        "tfplan.out",
+        "-var-file",
+        &tfvars,
+    ]);
+    let c = c.env("AWS_PROFILE", &infra_profile);
+    let c = c.dir(path.clone());
+    prompt_run! {"Execute command?", c, Expect::Success};
 
     println!("\nApply kubernetes-tectonic");
-    println!("Path: {:?}", path);
-    println!("Command: terraform apply tfplan.out");
-    if continue_prompt("Execute command?") {
-        let status = terraform::apply(&path, &infra_profile)?;
-        if !status.success() {
-            println!("\nAn error occurred, but this is expected");
-        }
-    } else {
-        return Ok(());
-    }
+    let mut c = Cmd::new(vec!["terraform", "apply", "tfplan.out"]);
+    let c = c.env("AWS_PROFILE", &infra_profile);
+    let c = c.dir(path.clone());
+    prompt_run! {"Execute command?", c, Expect::Failure};
 
     println!("\nRe-plan changes to kubernetes-tectonic after expected error");
-    println!("Path: {:?}", path);
-    println!(
-        "Command: terraform plan -out tfplan.out -var-file {}.tfvars",
-        cluster_id
-    );
-    if continue_prompt("Execute command?") {
-        let status = terraform::plan_with_tfvars_file(&path, &cluster_id, &infra_profile)?;
-        match status.code() {
-            Some(1) => {
-                return Err(anyhow!("could not re-plan kubernetes-tectonic"));
-            }
-            _ => { /* no op - continue */ }
-        }
-    } else {
-        return Ok(());
-    }
+    let mut c = Cmd::new(vec![
+        "terraform",
+        "plan",
+        "-out",
+        "tfplan.out",
+        "-var-file",
+        &tfvars,
+    ]);
+    let c = c.env("AWS_PROFILE", &infra_profile);
+    let c = c.dir(path.clone());
+    prompt_run! {"Execute command?", c, Expect::Success};
+
     println!("\nRe-apply kubernetes-tectonic");
-    println!("Path: {:?}", path);
-    println!("Command: terraform apply tfplan.out");
-    if continue_prompt("Execute command?") {
-        let status = terraform::apply(&path, &infra_profile)?;
-        if !status.success() {
-            return Err(anyhow!("unexpected error on second apply"));
-        }
-    } else {
-        return Ok(());
-    }
+    let mut c = Cmd::new(vec!["terraform", "apply", "tfplan.out"]);
+    let c = c.env("AWS_PROFILE", &infra_profile);
+    let c = c.dir(path.clone());
+    prompt_run! {"Execute command?", c, Expect::Failure};
 
     println!("\nEnjoy your new cluster :)");
 
