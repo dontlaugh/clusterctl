@@ -10,6 +10,7 @@ pub struct Config {
     pub kubernetes_deployments_path: String,
     pub keybase_secure_manifests_path: String,
     pub kubernetes_deployments_revision: String,
+    pub kubernetes_deployments_ssh_key: String,
     pub infra_profile: String,
     pub v1_profile: String,
     pub assets_cache_path: String,

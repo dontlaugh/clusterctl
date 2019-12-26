@@ -4,13 +4,14 @@
 use anyhow::{anyhow, Error};
 use clap::{App, Arg, SubCommand};
 use console::Style;
-use dialoguer::{theme::ColorfulTheme, Confirmation, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirmation, Editor, Input, Select};
 use std::env;
 use std::env::args;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::str::FromStr;
 
 mod config;
 mod helm;
@@ -90,7 +91,133 @@ fn argo_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
     let c = Cmd::new(vec!["kubectl", "create", "ns", "argocd"]);
     prompt_run! { "Execute?", c, Expect::Success };
 
-    let deployments = &conf.kubernetes_deployments_path;
+    let path = Path::new(&conf.kubernetes_deployments_path).to_path_buf();
+
+    // helm dep update
+    // helm dep update charts/pp-argo-cd
+
+    let mut c = Cmd::new(vec!["helm", "dep", "update", "charts/pp-argo-cd"]);
+    let c = c.dir(path.clone());
+    prompt_run! { "Execute?", c, Expect::Success };
+
+    // # Template your ArgoCD YAML manifests; "warning: destination for dexConfig is a table" can be ignored
+    // helm template -n argocd -f charts/pp-argo-cd/values-${CLUSTER_NAMESPACE}.yaml charts/pp-argo-cd > /tmp/argo_template.yaml
+
+    let d_ns = default_namespace(&cluster_id);
+    let chart = format!("charts/pp-argo-cd/values-{}.yaml", d_ns);
+    let mut c = Cmd::new(vec!["helm", "template", "-n", "argocd", "-f", &chart]);
+    let c = c.dir(path.clone());
+    let outfile = PathBuf::new().join("/tmp/argo_template.yaml");
+    let c = c.writes_file(outfile);
+    prompt_run! { "Template pp-argo-cd chart?", c, Expect::Success };
+
+    // # Deploy ArgoCD to your cluster
+    // kubectl apply -n argocd -f /tmp/argo_template.yaml
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "apply",
+        "-n",
+        "argocd",
+        "-f",
+        "/tmp/argo_template.yaml",
+    ]);
+    prompt_run! { "Deploy argocd?", c, Expect::Success };
+
+    // TODO pause here for a couple of minutes while argo deploys
+
+    // # Grab the ArgoCD server name
+    // kubectl get pods -n argocd | grep argocd-server | awk '{print $1}'
+    let argocd_server = kubectl::get_argo_server_name()?;
+    println!("\nDiscovered argocd-server pod: {}", &argocd_server);
+
+    // # Capture the argocd-server ELB address
+    // kubectl get svc -o wide -n argocd | grep argocd-server | awk '{print $4}'
+    let argo_elb = kubectl::get_argo_elb()?;
+    println!("\nDiscovered argocd-server elb: {}", &argocd_server);
+
+    // # Raise a PR similar to https://github.com/paperlesspost/terraforming/pull/891 plan and apply once approved
+    println!("\nSkipping creation of DNS records for argocd or argocd-beta subdomain");
+    println!("https://github.com/paperlesspost/terraforming/pull/891");
+
+    // # Login to ArgoCD
+    let c = Cmd::new(vec![
+        "argocd",
+        "login",
+        &argo_elb,
+        "--username",
+        "admin",
+        "--password",
+        &argocd_server,
+    ]);
+    prompt_run!("Log in to argo?", c, Expect::Success);
+
+    // # Add our Argo Git repo to the cluster
+    let repo = "git@github.com:paperlesspost/kubernetes-deployments";
+    let pk = &conf.kubernetes_deployments_ssh_key;
+    let c = Cmd::new(vec![
+        "argocd",
+        "repo",
+        "add",
+        repo,
+        "--ssh-private-key-path",
+        pk,
+    ]);
+
+    // # Patch our argocd-secret to allow for Github auth, the value needed is
+    // in 1Password Infra Vault under `ArgoCD Beta Github App`
+
+    if let Some(dex_secret) = Editor::new()
+        .edit("Enter 1P entry 'ArgoCD Beta Github App' (or equivalent) on exactly one line")
+        .unwrap()
+    {
+        // Brackets {} are annoying to escape, so we build each part: left, secret, right
+        let (left, right) = ("{ \"data\": { \"dex.github.clientSecret\": \"", "\"}}");
+        let patch = format!("{}{}{}", left, &dex_secret, right);
+        let c = Cmd::new(vec![
+            "kubectl",
+            "patch",
+            "secret",
+            "argocd-secret",
+            "-n",
+            "argocd",
+            "--patch",
+            &patch,
+        ]);
+        prompt_run!("Patch argocd-secret?", c, Expect::Success);
+    } else {
+        println!("You must enter a dex secret. Exiting.");
+        std::process::exit(1);
+    }
+
+    // # Create a bootstrap project with destination (-d) "anyserver,any namespace" and source (-s) "any git repo"
+    let c = Cmd::new(vec!["argocd", "proj", "create", "bootstrap", "-d", "*,*", "-s", "*"]);
+    prompt_run!("Create argocd bootstrap project?", c, Expect::Success);
+
+    // # Allow bootstrap project to manage any k8s resource GROUP and KIND
+    // argocd proj allow-cluster-resource bootstrap "*" "*"
+    let c = Cmd::new(vec!["argocd", "proj", "allow-cluster-resource", "bootsrap", "*", "*"]);
+    prompt_run!("Let bootstrap project manage any k8s resource?", c, Expect::Success);
+
+    // # Bootstrap cluster resources
+    // argocd app create -f bootstrap/${CLUSTER_NAMESPACE}/cluster.yaml
+    let cluster_app_manifest = format!("bootstrap/{}/cluster.yaml", d_ns);
+    let mut c = Cmd::new(vec!["argocd", "app", "create", "-f", ]);
+    let c = c.dir(path.clone());
+    prompt_run!("Create bootstrap project for cluster services?", c, Expect::Success);
+    // #Verify that Chartmuseum is running, by making sure the output of the following command is "0".
+    // kubectl get pods -n ${CLUSTER_NAMESPACE} |grep chartmuseum |grep Running > /dev/null; echo $?
+
+
+    // Templating yaml inside json ... :)
+    // kubectl patch configmap argocd-cm -n argocd --patch PATCH
+    let left = "{ \"data\": { \"helm.repositories\": \"- name: paperless\n  type: helm\n  url: http://chartmuseum.";
+    let right = "\n\"}}";
+    let patch = format!("{}{}{}", left, d_ns, right);
+    let c = Cmd::new(vec!["kubectl", "patch", "configmap", "argocd-cm", "-n", "argocd", "--patch", &patch]);
+
+    // # Finally deploy Heapster to your cluster so that metrics can be collected - see script for detailed usage instructions
+    // ./bin/deploy_heapster.sh ${CLUSTER_NAMESPACE} X
 
     Ok(())
 }
