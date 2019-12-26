@@ -83,20 +83,14 @@ fn argo_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
         .ok_or(anyhow!("malformed assets path"))?;
     download_kubeconfig(&bucket, infra_profile, path)?;
 
+    env::remove_var("KUBECONFIG");
+    env::set_var("KUBECONFIG", &path);
+
     // create namespace
-    let k = kubectl::Kubectl::new(&path);
-    let d_ns = default_namespace(&cluster_id);
+    let c = Cmd::new(vec!["kubectl", "create", "ns", "argocd"]);
+    prompt_run! { "Execute?", c, Expect::Success };
 
     let deployments = &conf.kubernetes_deployments_path;
-    if continue_prompt("Create argocd namespace?") {
-        let status = k.create_namespace("argocd")?;
-        //        let status = run!(k.create_namespace("argocd"));
-        if !status.success() {
-            return Err(anyhow!("could not create namespace"));
-        }
-    } else {
-        return Ok(());
-    }
 
     Ok(())
 }
@@ -115,56 +109,72 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
         .ok_or(anyhow!("malformed assets path"))?;
     download_kubeconfig(&bucket, infra_profile, path)?;
 
-    // create namespace
-    let k = kubectl::Kubectl::new(&path);
-    let d_ns = default_namespace(&cluster_id);
+    // Child processes will inherit our custom KUBECONFIG
+    env::remove_var("KUBECONFIG");
+    env::set_var("KUBECONFIG", &path);
 
-    if continue_prompt("Create default namespace?") {
-        let status = k.create_namespace(d_ns)?;
-        if !status.success() {
-            return Err(anyhow!("could not create namespace"));
-        }
-    } else {
-        return Ok(());
-    }
+    // create namespace
+    let d_ns = default_namespace(&cluster_id);
+    let c = Cmd::new(vec!["kubectl", "create", "ns", d_ns]);
+    prompt_run! { "Execute?", c, Expect::Success };
 
     let secure_manifests = &conf.keybase_secure_manifests_path;
     let shared_secrets = Path::new(secure_manifests).join("secrets/shared");
     let default_ns_secrets = Path::new(secure_manifests).join(format!("secrets/{}", d_ns));
     let default_ns_configmaps = Path::new(secure_manifests).join(format!("configMaps/{}", d_ns));
-    if continue_prompt("Deploy secrets and config maps?") {
-        let status =
-            k.create_with_manifest_recursive("kube-system", shared_secrets.to_str().unwrap())?;
-        if !status.success() {
-            println!("got an error creating kube-system secrets");
-        }
-        let status =
-            k.create_with_manifest_recursive(d_ns, default_ns_secrets.to_str().unwrap())?;
-        if !status.success() {
-            println!("got an error creating {} namespace secrets", d_ns);
-        }
-        let status =
-            k.create_with_manifest_recursive(d_ns, default_ns_configmaps.to_str().unwrap())?;
-        if !status.success() {
-            println!("got an error creating {} namespace configmaps", d_ns);
-        }
-        let status = k.create_config_map_literal(
-            "kube-system",
-            "cluster-info",
-            "cluster-name",
-            &cluster_id,
-        )?;
-        if !status.success() {
-            println!("got an error creating cluster-info configmap in kube-system");
-        }
-        let status =
-            k.create_config_map_literal(d_ns, "cluster-info", "cluster-name", &cluster_id)?;
-        if !status.success() {
-            println!("got an error creating cluster-info configmap in {}", d_ns);
-        }
-    } else {
-        return Ok(());
-    }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "-n",
+        "kube-system",
+        "-Rf",
+        shared_secrets.to_str().unwrap(),
+    ]);
+    prompt_run! { "Deploy shared secrets?", c, Expect::Success }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "-n",
+        d_ns,
+        "-Rf",
+        default_ns_secrets.to_str().unwrap(),
+    ]);
+    prompt_run! { "Deploy default namespace secrets?", c, Expect::Success }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "-n",
+        d_ns,
+        "-Rf",
+        default_ns_configmaps.to_str().unwrap(),
+    ]);
+    prompt_run! { "Deploy default namespace config maps?", c, Expect::Success }
+
+    let from_literal = format!("--from-literal=cluster-name={}", &cluster_id);
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "configmap",
+        "cluster-info",
+        &from_literal,
+        "-n",
+        "kube-system",
+    ]);
+    prompt_run! { "Create cluster-info config map in kube-system namespace?", c, Expect::Success }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "configmap",
+        "cluster-info",
+        &from_literal,
+        "-n",
+        &d_ns,
+    ]);
+    prompt_run! { "Create cluster-info config map in default namespace?", c, Expect::Success }
 
     Ok(())
 }
@@ -228,7 +238,7 @@ This will step you through launching a cluster.
     let mut c = Cmd::new(vec!["terraform", "apply", "tfplan.out"]);
     let c = c.env("AWS_PROFILE", &infra_profile);
     let c = c.dir(path.clone());
-    prompt_run! {"Execute command?", c, Expect::Failure};
+    prompt_run! {"Execute command?", c, Expect::Success};
 
     println!("\nEnjoy your new cluster :)");
 

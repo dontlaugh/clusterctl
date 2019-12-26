@@ -177,3 +177,6 @@ fn test_cmd() {
         "VALUE".to_string(),
     );
 }
+
+// Memory safety: while something is borrowed, it can no longer be moved
+// or changed, or mutably borrowed again.
