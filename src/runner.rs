@@ -73,7 +73,7 @@ impl<'a> Cmd<'a> {
             c.current_dir(&cwd);
         }
 
-        if let Some(_) = &self.working_dir {
+        if let Some(_) = &self.writes_file {
             // we only handle stdout redirection right now
             c.stdout(Stdio::piped());
         }
