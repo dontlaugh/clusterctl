@@ -12,3 +12,23 @@ must make sure that you have correct `AWS_PROFILE` and `KUBECONFIG` env vars set
 * `clusterctl namespace-init`
 * `clusterctl argo-init`
 
+## Destroying a cluster
+
+* `clusterctl destroy-cluster`
+* `clusterctl destroy-kubernetes-ingress``
+
+## Completions
+
+The clap cli framework can generate completion scripts. In bash these cannot be
+directly `eval`'d, so you must write a script and source it from your shell. Add
+something like this to your .bashrc
+
+```bash
+if [[ ! -f /tmp/clusterctl_completions.bash ]]; then
+    clusterctl completions bash
+fi
+source /tmp/clusterctl_completions.bash
+```
+
+Something similar should work for zsh
+

@@ -2,13 +2,15 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 use anyhow::{anyhow, Error};
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg, Shell, SubCommand};
 use console::Style;
 use dialoguer::{theme::ColorfulTheme, Confirmation, Editor, Input, Select};
 use std::env;
 use std::env::args;
 use std::fs::File;
+use std::io;
 use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::str::FromStr;
@@ -28,7 +30,7 @@ fn main() -> Result<(), Error> {
     let default_config = home_with(".config/clusterctl/config.toml");
     create_dir(&default_dir.clone()).expect("could not create default config dir");
 
-    let app = App::new("clusterctl")
+    let mut app = App::new("clusterctl")
         .about("Interactive wrapper that stands up and tears down Kubernetes")
         .version("0.1.0")
         .arg(
@@ -41,6 +43,13 @@ fn main() -> Result<(), Error> {
         )
         .subcommands(vec![
             SubCommand::with_name("cache-assets").about("cache generated kube configs locally"),
+            SubCommand::with_name("completions")
+                .about("generate a completions script for your shell")
+                .arg(
+                    Arg::with_name("shell")
+                        .possible_values(&["bash", "zsh"])
+                        .required(true),
+                ),
             SubCommand::with_name("destroy-cluster").about("destroy a k8s cluster"),
             SubCommand::with_name("destroy-kubernetes-ingress")
                 .about("destroy the ingress DNS records"),
@@ -52,6 +61,8 @@ fn main() -> Result<(), Error> {
             SubCommand::with_name("tool-check").about("check for required tools on PATH"),
         ]);
 
+    let (bash, zsh) = completions(&mut app);
+
     // Load config
     let matches = app.get_matches();
     let config_path = matches
@@ -61,6 +72,11 @@ fn main() -> Result<(), Error> {
 
     // Subcommands
     match matches.subcommand() {
+        ("completions", Some(args)) => match args.value_of("shell").unwrap() {
+            "bash" => io::stdout().lock().write_all(&bash).unwrap(),
+            "zsh" => io::stdout().lock().write_all(&bash).unwrap(),
+            _ => unreachable!(),
+        },
         ("destroy-cluster", _) => destroy_cluster(&config)?,
         ("destroy-kubernetes-ingress", _) => destroy_kubernetes_ingress(&config, None)?,
         ("launch-cluster", _) => launch_cluster(&config)?,
@@ -71,6 +87,16 @@ fn main() -> Result<(), Error> {
 
     Ok(())
 }
+
+fn completions(app: &mut App) -> (Vec<u8>, Vec<u8>) {
+    let mut bash = Vec::<u8>::new();
+    let mut zsh = Vec::<u8>::new();
+    let bin = "clusterctl";
+    app.gen_completions_to(bin, Shell::Bash, &mut bash);
+    app.gen_completions_to(bin, Shell::Zsh, &mut zsh);
+    (bash, zsh)
+}
+
 fn argo_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
     let cluster_id = cluster_id.unwrap_or(pick_cluster_id_prompt()?);
     let infra_profile = &conf.infra_profile;
@@ -224,7 +250,7 @@ fn argo_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error> {
         Expect::Success
     );
 
-    // Launch platform services 
+    // Launch platform services
     let cluster_app_manifest = format!("bootstrap/{}/cluster.yaml", d_ns);
     let mut c = Cmd::new(vec!["argocd", "app", "create", "-f", &cluster_app_manifest]);
     let c = c.dir(path.clone());
