@@ -25,7 +25,7 @@ This takes between 20 to 30 minutes.
 ## Destroying a cluster
 
 * `clusterctl destroy-cluster`
-* `clusterctl destroy-kubernetes-ingress``
+* `clusterctl destroy-kubernetes-ingress`
 
 This takes between 5 to 10 minutes.
 
