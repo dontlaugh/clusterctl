@@ -1,5 +1,13 @@
 # clusterctl
 
+## Installing
+
+Clone this repo, cd into the root, and run this (--force overwrites previous versions)
+
+```
+cargo install --path . --force
+```
+
 ## Launching a cluster
 
 Do the following from a single terminal. clusterctl will set env vars for its
