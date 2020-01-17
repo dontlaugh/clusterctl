@@ -107,7 +107,7 @@ macro_rules! prompt_run {
         use std::io::Write;
         use std::process::Child;
 
-        // print message
+        println!("---");
         // print path
         println!(
             "PATH: {:?}",

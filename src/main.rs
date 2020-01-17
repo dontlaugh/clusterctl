@@ -337,6 +337,7 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
     let shared_secrets = Path::new(secure_manifests).join("secrets/shared");
     let default_ns_secrets = Path::new(secure_manifests).join(format!("secrets/{}", d_ns));
     let default_ns_configmaps = Path::new(secure_manifests).join(format!("configMaps/{}", d_ns));
+    let shared_configmaps = Path::new(secure_manifests).join("configMaps/shared");
     let mars_secrets = Path::new(secure_manifests).join("secrets/mars");
 
     let c = Cmd::new(vec![
@@ -348,6 +349,16 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
         shared_secrets.to_str().unwrap(),
     ]);
     prompt_run! { "Deploy shared secrets?", c, Expect::Success }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "-n",
+        d_ns,
+        "-Rf",
+        shared_configmaps.to_str().unwrap(),
+    ]);
+    prompt_run! { "Deploy shared config maps?", c, Expect::Success }
 
     let c = Cmd::new(vec![
         "kubectl",
@@ -367,7 +378,7 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
         "-Rf",
         default_ns_configmaps.to_str().unwrap(),
     ]);
-    prompt_run! { "Deploy mars namespace secrets? NOTE: An error is expected", c, Expect::Failure }
+    prompt_run! { "Deploy default namespace config maps? NOTE: An error is expected", c, Expect::Failure }
     let c = Cmd::new(vec![
         "kubectl",
         "create",
@@ -376,6 +387,7 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
         "-Rf",
         mars_secrets.to_str().unwrap(),
     ]);
+    prompt_run! { "Deploy mars namespace secrets? NOTE: An error is expected", c, Expect::Failure }
 
     let from_literal = format!("--from-literal=cluster-name={}", &cluster_id);
     let c = Cmd::new(vec![
@@ -399,6 +411,17 @@ fn namespace_init(conf: &Config, cluster_id: Option<String>) -> Result<(), Error
         &d_ns,
     ]);
     prompt_run! { "Create cluster-info config map in default namespace?", c, Expect::Success }
+
+    let c = Cmd::new(vec![
+        "kubectl",
+        "create",
+        "configmap",
+        "cluster-info",
+        &from_literal,
+        "-n",
+        "mars",
+    ]);
+    prompt_run! { "Create cluster-info config map in mars namespace?", c, Expect::Success }
 
     Ok(())
 }
