@@ -32,7 +32,7 @@ fn main() -> Result<(), Error> {
 
     let mut app = App::new("clusterctl")
         .about("Interactive wrapper that stands up and tears down Kubernetes")
-        .version("0.2.0")
+        .version("0.3.0")
         .arg(
             Arg::with_name("config")
                 .short("c")
