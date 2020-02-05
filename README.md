@@ -16,17 +16,23 @@ the following.
 ```toml
 # path to the terraforming repo
 terraforming_path = "/home/cmcfarland/Code/terraforming"
+
 # path to the kubernetes-deployments repo
 kubernetes_deployments_path = "/home/cmcfarland/Code/kubernetes-deployments"
+
 # path to the kubernetes-deployments ssh key (used to configure argocd)
 kubernetes_deployments_ssh_key = "/keybase/team/paperlesspost.infra.keys/ssh/kubernetes-deployments"
+
 # path to the k8s secure_manifests directory; this is different on macos
 keybase_secure_manifests_path = "/keybase/team/paperlesspost.kubernetes.secure_manifests"
-# TODO: is this used?
+
+# TODO: this config value is currently unused
 kubernetes_deployments_revision = "master"
+
 # AWS profiles to use when calling terraform or aws cli
 infra_profile = "infra_power_user"
 v1_profile = "v1_power_user"
+
 # path where kubectl, ssh keys will be downloaded after cluster launch
 assets_cache_path = "/home/cmcfarland/.config/clusterctl/assets"
 ```
